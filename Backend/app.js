@@ -6,12 +6,8 @@ const http = require("http");
 
 require('dotenv').config();
 
-app.use(cors({
-  // origin: "http://localhost:3000",
-  origin: "*",
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-}));
+app.use(cors()); // allow all origins
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
