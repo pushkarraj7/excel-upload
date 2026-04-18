@@ -1,0 +1,165 @@
+.price-container {
+    margin-top: 2rem;
+    h2 {
+        font-size: 28px;
+        font-weight: 600;
+    }
+}
+
+.price-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1rem;
+
+    th,
+    td {
+        padding: 8px;
+        border: 1px solid #e5e7eb;
+        text-align: center;
+    }
+
+    th {
+        background: #f3f4f6;
+    }
+
+    .buy {
+        color: green;
+        font-weight: bold;
+    }
+
+    .sell {
+        color: red;
+        font-weight: bold;
+    }
+}
+
+.pagination {
+    margin-top: 12px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: flex-end;
+
+    button {
+        font-size: 14px;
+        padding: 4px 8px;
+        background-color: #000080;
+    }
+}
+
+
+
+
+.price-table-wrapper {
+  overflow-x: auto;
+  border: 1px solid #e5e7eb;
+}
+
+.price-table {
+  border-collapse: collapse;
+  min-width: 1200px;
+  width: max-content;
+  font-size: 13px;
+}
+
+th,
+td {
+  border: 1px solid #e5e7eb;
+  padding: 8px 10px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+thead th {
+  background: #f9fafb;
+  font-weight: 600;
+}
+
+/* Sticky columns */
+.sticky-col {
+  position: sticky;
+  left: 0;
+  background: white;
+  z-index: 3;
+}
+
+.sticky-col-2 {
+  position: sticky;
+  left: 120px;
+  background: white;
+  z-index: 2;
+}
+
+.symbol {
+  min-width: 120px;
+  font-weight: 700;
+}
+
+.metric {
+  min-width: 120px;
+}
+
+/* BUY / SELL */
+.signal.buy {
+  color: #16a34a;
+  font-weight: 700;
+}
+
+.signal.sell {
+  color: #dc2626;
+  font-weight: 700;
+}
+
+.empty {
+  color: #9ca3af;
+}
+
+.filters {
+  display: flex;
+  gap: 16px;
+  margin-block: 20px;
+  flex-wrap: wrap;
+}
+
+.filters select {
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid #d1d5db;
+  background-color: #ffffff;
+  font-size: 14px;
+  min-width: 220px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.filters select:hover {
+  border-color: #6366f1;
+}
+
+.filters select:focus {
+  outline: none;
+  border-color: #4f46e5;
+  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.2);
+}
+
+.no-data-table {
+  margin-top: 20px;
+  height: 400px; /* Adjust as needed */
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background-color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.no-data-content {
+  font-size: 18px;
+  font-weight: 500;
+  color: #6b7280;
+}
+
+.price-table th,
+.price-table td {
+  min-width: 120px;
+}
