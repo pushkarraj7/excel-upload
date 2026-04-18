@@ -7,7 +7,8 @@ const http = require("http");
 require('dotenv').config();
 
 app.use(cors({
-  origin: "http://localhost:3000",
+  // origin: "http://localhost:3000",
+  origin: "*",
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
@@ -25,11 +26,13 @@ app.get('/', (req, res) => {
   res.send('Excel-data API is running...');
 });
 
+
 const server = http.createServer(app);
 const PORT = process.env.PORT || 8060;
 
 // ← Sync DB then start server
-sequelize.sync({ alter: true })
+// sequelize.sync({ alter: true })
+sequelize.sync()
   .then(() => {
     console.log('Database & tables synced');
     server.listen(PORT, () => {
