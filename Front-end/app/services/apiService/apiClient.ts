@@ -4,7 +4,8 @@ import axios from "axios";
  * Axios instance
  */
 const apiClient = axios.create({
-  baseURL: "http://localhost:8060/api", // ✅ set this
+  // baseURL: "http://localhost:8060/api", // ✅ set this
+  baseURL: "https://excel-backend-wsie.onrender.com/api",
   timeout: 15000,
   headers: {
     "Content-Type": "application/json",
