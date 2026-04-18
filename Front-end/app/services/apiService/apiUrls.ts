@@ -1,4 +1,6 @@
-const BASE_API = "http://localhost:8060/api";
+// const BASE_API = "http://localhost:8060/api";
+
+export const BASE_URL = "https://excel-backend-wsie.onrender.com";
 
 export const API_URLS = {
     UPLOAD_COMPANIES: `/main/upload-companies`,
