@@ -6,7 +6,14 @@ const http = require("http");
 
 require('dotenv').config();
 
-app.use(cors()); // allow all origins
+app.use(cors({
+  origin: [
+    "http://localhost:3000",
+    "https://excel-upload-nine.vercel.app"
+  ],
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  credentials: true
+}));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
