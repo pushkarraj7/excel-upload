@@ -3,7 +3,6 @@ require("dotenv").config();
 const { Op } = require("sequelize");
 const utilService = require("../services/utilService");
 const averageService = require("../services/average.service");
-const parseExcel = require("../services/excel.service");
 const path = require("path");
 const XLSX = require("xlsx");
 
@@ -70,12 +69,13 @@ const uploadCompanies = async (req, res) => {
 };
 
 /**
- * Excel format:
- * | Company Name | Symbol | 1-1-25 | 2-1-25 | 3-1-25 | ...
+ * Excel format (user-uploaded):
+ * | Company Name | Symbol | 1-1-25 | 2-1-25 | ...
+ *
+ * FIX: If a symbol from the price Excel is not in the companies table,
+ * we auto-insert it so no rows are silently skipped.
  */
 const bulkUploadPriceData = async (req, res) => {
-  const transaction = await model.sequelize.transaction();
-
   try {
     const filePath = path.join(
       __dirname,
@@ -86,63 +86,167 @@ const bulkUploadPriceData = async (req, res) => {
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
 
-    // 2️⃣ Convert sheet to JSON
-    const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
+    // ✅ raw: false keeps date columns as strings e.g. "1-1-25" not 45658
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: null, raw: false });
 
     if (!rows.length) {
       return res.status(400).json({ message: "Excel is empty" });
     }
 
-    const companies = await model.Company.findAll();
+    /* -----------------------------------------
+       1️⃣ BUILD SYMBOL → COMPANY NAME MAP FROM EXCEL
+    ------------------------------------------ */
+    const excelSymbolMap = {};
+    for (const row of rows) {
+      const symbol = row["Symbol"];
+      const companyName = row["Company Name"];
+      if (symbol) {
+        excelSymbolMap[symbol.trim()] = companyName
+          ? companyName.trim()
+          : symbol.trim();
+      }
+    }
+
+    const excelSymbols = Object.keys(excelSymbolMap);
+    if (!excelSymbols.length) {
+      return res.status(400).json({
+        message: 'No "Symbol" column found in Excel. Check your file format.',
+      });
+    }
+
+    /* -----------------------------------------
+       2️⃣ FIND WHICH SYMBOLS ARE MISSING IN DB
+       ✅ No transaction here — read-only query
+    ------------------------------------------ */
+    const existingCompanies = await model.Company.findAll({
+      where: { symbol: { [Op.in]: excelSymbols } },
+    });
+
+    const existingSymbols = new Set(existingCompanies.map((c) => c.symbol));
+    const missingSymbols = excelSymbols.filter((s) => !existingSymbols.has(s));
+
+    /* -----------------------------------------
+       3️⃣ AUTO-INSERT MISSING COMPANIES
+       ✅ Separate from main transaction — prevents connection timeout
+          on large datasets (2800+ companies)
+    ------------------------------------------ */
+    if (missingSymbols.length) {
+      console.log(`Auto-inserting ${missingSymbols.length} missing companies`);
+
+      const newCompanies = missingSymbols.map((symbol) => ({
+        symbol,
+        companyName: excelSymbolMap[symbol],
+        marketCap: null,
+        index1: null,
+        index2: null,
+        index3: null,
+      }));
+
+      // ✅ No transaction — committed immediately, connection stays alive
+      await model.Company.bulkCreate(newCompanies, {
+        ignoreDuplicates: true,
+      });
+    }
+
+    /* -----------------------------------------
+       4️⃣ RELOAD FULL COMPANY MAP (now includes new ones)
+       ✅ No transaction — read-only query
+    ------------------------------------------ */
+    const allCompanies = await model.Company.findAll({
+      where: { symbol: { [Op.in]: excelSymbols } },
+    });
 
     const companyMap = {};
-    companies.forEach((c) => {
+    allCompanies.forEach((c) => {
       companyMap[c.symbol] = c.id;
     });
 
+    /* -----------------------------------------
+       5️⃣ BUILD PRICE ROWS
+    ------------------------------------------ */
     const bulkPrices = [];
+    let skippedInvalidDate = 0;
+    let skippedNoPrice = 0;
+    let skippedNoCompany = 0;
 
     for (const row of rows) {
-      const companyId = companyMap[row.Symbol];
-      if (!companyId) continue;
+      const symbol = row["Symbol"] ? row["Symbol"].trim() : null;
+      const companyId = symbol ? companyMap[symbol] : null;
 
-      Object.keys(row).forEach((key) => {
-        // Skip non-date columns
-        if (key === "Company Name" || key === "Symbol") return;
+      if (!companyId) {
+        skippedNoCompany++;
+        continue;
+      }
+
+      for (const key of Object.keys(row)) {
+        if (key === "Company Name" || key === "Symbol") continue;
 
         const price = Number(row[key]);
-        if (!price || isNaN(price)) return;
+        if (!price || isNaN(price)) {
+          skippedNoPrice++;
+          continue;
+        }
 
         const priceDate = utilService.normalizeExcelDate(key);
 
-        // 🔒 HARD STOP — invalid dates NEVER reach Sequelize
         if (!priceDate) {
+          skippedInvalidDate++;
           console.warn("Skipping invalid date column:", key);
-          return;
+          continue;
         }
 
         if (!/^\d{4}-\d{2}-\d{2}$/.test(priceDate)) {
+          skippedInvalidDate++;
           console.warn("Malformed DATEONLY:", priceDate);
-          return;
+          continue;
         }
 
         bulkPrices.push({
           companyId,
-          priceDate: priceDate,
+          priceDate,
           closePrice: price,
         });
+      }
+    }
+
+    if (!bulkPrices.length) {
+      return res.status(400).json({
+        message:
+          "No valid price rows found. Check date column format (expected: D-M-YY or D-M-YYYY).",
+        debug: { skippedInvalidDate, skippedNoPrice, skippedNoCompany },
       });
     }
 
-    await model.PriceData.bulkCreate(bulkPrices, {
-      transaction,
-      ignoreDuplicates: true,
-    });
+    /* -----------------------------------------
+       6️⃣ BULK INSERT PRICES — own transaction
+    ------------------------------------------ */
+    // ✅ NEW — insert in chunks of 1000, no transaction
+    const CHUNK_SIZE = 1000;
+    let totalInserted = 0;
 
-    await transaction.commit();
-    res.json({ message: "Price data uploaded successfully" });
+    for (let i = 0; i < bulkPrices.length; i += CHUNK_SIZE) {
+      const chunk = bulkPrices.slice(i, i + CHUNK_SIZE);
+      // await model.PriceData.bulkCreate(chunk, {
+      //   ignoreDuplicates: true,
+      // });
+      await model.PriceData.bulkCreate(chunk, {
+        updateOnDuplicate: ["closePrice", "updatedAt"],
+      });
+      totalInserted += chunk.length;
+      console.log(
+        `Inserted ${totalInserted}/${bulkPrices.length} price rows...`,
+      );
+    }
+
+    res.json({
+      message: "Price data uploaded successfully",
+      totalInserted: totalInserted,
+      newCompaniesAutoCreated: missingSymbols.length,
+      newCompanies: missingSymbols,
+      debug: { skippedInvalidDate, skippedNoPrice, skippedNoCompany },
+    });
   } catch (err) {
-    await transaction.rollback();
+    console.error("bulkUploadPriceData error:", err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -162,7 +266,7 @@ const calculateAveragesForAllCompanies = async (req, res) => {
         raw: true,
       });
 
-      if (prices.length < 50) continue; // not enough data
+      if (prices.length < 50) continue;
 
       const signals = averageService.calculateSignals(prices);
 
@@ -189,135 +293,6 @@ const calculateAveragesForAllCompanies = async (req, res) => {
   }
 };
 
-// const getAllMovingAveragesTable = async (req, res) => {
-//     try {
-//         const { range = "3m" } = req.query;
-//         const companies = await model.Company.findAll({ attributes: ["id", "symbol"], raw: true });
-//         const response = [];
-
-//         for (const company of companies) {
-//             // 1️⃣ Get last available price date
-//             const lastPrice = await model.PriceData.findOne({
-//                 where: { companyId: company.id },
-//                 order: [["priceDate", "DESC"]],
-//                 attributes: ["priceDate"],
-//                 raw: true,
-//             });
-
-//             if (!lastPrice) continue;
-
-//             const { start, end, visibleDays } = utilService.resolveRangeWithFallback(lastPrice.priceDate, range);
-
-//             // 2️⃣ Fetch price data
-//             const prices = await model.PriceData.findAll({
-//                 where: {
-//                     companyId: company.id,
-//                     priceDate: { [Op.between]: [start, end] },
-//                 },
-//                 order: [["priceDate", "ASC"]],
-//                 raw: true,
-//             });
-
-//             if (!prices.length) continue;
-
-//             // 3️⃣ Calculate moving averages
-//             const calculated = utilService.calculateDailyMovingAverages(prices);
-
-//             // 4️⃣ Slice last 'visibleDays' or all available if less
-//             // const visibleRows = calculated.slice(-visibleDays);
-//             const visibleRows = calculated.slice(-visibleDays).reverse();
-
-//             response.push({
-//                 symbol: company.symbol,
-//                 lastAvailableDate: lastPrice.priceDate,
-//                 rows: visibleRows,
-//             });
-//         }
-
-//         res.json({
-//             range,
-//             totalSymbols: response.length,
-//             data: response,
-//         });
-//     } catch (err) {
-//         console.error(err);
-//         res.status(500).json({ error: err.message });
-//     }
-// };
-
-// const getAllMovingAveragesTable = async (req, res) => {
-//   try {
-//     const { range = "3m", index } = req.query;
-
-//     const companies = await model.Company.findAll({
-//       where: index
-//         ? {
-//             [Op.or]: [{ index1: index }, { index2: index }, { index3: index }],
-//           }
-//         : {},
-//       attributes: ["id", "symbol", "marketCap", "index1", "index2", "index3"],
-//       raw: true,
-//     });
-
-//     const response = [];
-
-//     for (const company of companies) {
-//       const lastPrice = await model.PriceData.findOne({
-//         where: { companyId: company.id },
-//         order: [["priceDate", "DESC"]],
-//         attributes: ["priceDate"],
-//         raw: true,
-//       });
-
-//       if (!lastPrice) continue;
-
-//       const { start, end, visibleDays } = utilService.resolveRangeWithFallback(
-//         lastPrice.priceDate,
-//         range,
-//       );
-
-//       const prices = await model.PriceData.findAll({
-//         where: {
-//           companyId: company.id,
-//           priceDate: { [Op.between]: [start, end] },
-//         },
-//         order: [["priceDate", "ASC"]],
-//         raw: true,
-//       });
-
-//       if (!prices.length) continue;
-
-//       const calculated = utilService.calculateDailyMovingAverages(prices);
-
-//       const visibleRows = calculated.slice(-visibleDays).reverse(); // latest first
-
-//       response.push({
-//         symbol: company.symbol,
-//         marketCap: company.marketCap,
-//         index1: company.index1,
-//         index2: company.index2,
-//         index3: company.index3,
-//         lastAvailableDate: lastPrice.priceDate,
-//         rows: visibleRows,
-//       });
-//     }
-
-//     response.sort(
-//       (a, b) => new Date(b.lastAvailableDate) - new Date(a.lastAvailableDate),
-//     );
-
-//     res.json({
-//       range,
-//       index: index || "ALL",
-//       totalSymbols: response.length,
-//       data: response,
-//     });
-//   } catch (err) {
-//     console.error(err);
-//     res.status(500).json({ error: err.message });
-//   }
-// };
-
 const getAllMovingAveragesTable = async (req, res) => {
   try {
     const {
@@ -331,19 +306,9 @@ const getAllMovingAveragesTable = async (req, res) => {
 
     const conditions = [];
 
-    // REMOVE this:
     const buildOr = (val) => ({
       [Op.or]: [{ index1: val }, { index2: val }, { index3: val }],
     });
-
-    if (index1) conditions.push(buildOr(index1));
-    if (index2) conditions.push(buildOr(index2));
-    if (index3) conditions.push(buildOr(index3));
-
-    // REPLACE with this:
-    if (index1) conditions.push({ index1: index1 });
-    if (index2) conditions.push({ index2: index2 });
-    if (index3) conditions.push({ index3: index3 });
 
     if (index1) conditions.push(buildOr(index1));
     if (index2) conditions.push(buildOr(index2));
@@ -375,7 +340,6 @@ const getAllMovingAveragesTable = async (req, res) => {
 
     const companyIds = companies.map((c) => c.id);
 
-    // 1. Fetch max priceDate per company directly from DB engine
     const lastDatesResult = await model.PriceData.findAll({
       attributes: [
         "companyId",
@@ -394,12 +358,10 @@ const getAllMovingAveragesTable = async (req, res) => {
       lastDatesMap[r.companyId] = r.lastAvailableDate;
     });
 
-    // 2. Identify global min 'start' date based on required dynamic fallbacks
     let globalStart = null;
     const companyRanges = {};
 
     if (startDate && endDate) {
-      // Manual calendar mode
       const sDate = new Date(startDate);
       const fetchDate = new Date(sDate);
       fetchDate.setDate(sDate.getDate() - 60);
@@ -415,7 +377,6 @@ const getAllMovingAveragesTable = async (req, res) => {
         };
       });
     } else {
-      // String fallback mode
       companies.forEach((company) => {
         const lastDate = lastDatesMap[company.id];
         if (lastDate) {
@@ -433,19 +394,12 @@ const getAllMovingAveragesTable = async (req, res) => {
     if (!globalStart) {
       return res.json({
         range,
-        filterApplied: index1
-          ? `index1=${index1}`
-          : index2
-            ? `index2=${index2}`
-            : index3
-              ? `index3=${index3}`
-              : "ALL",
+        filterApplied: "ALL",
         totalSymbols: 0,
         data: [],
       });
     }
 
-    // 3. Batched Memory Aggregation Network Query
     const priceWhere = { companyId: { [Op.in]: companyIds } };
     if (startDate && endDate) {
       priceWhere.priceDate = { [Op.between]: [globalStart, endDate] };
@@ -467,7 +421,6 @@ const getAllMovingAveragesTable = async (req, res) => {
 
     const response = [];
 
-    // 4. Memory thread processing decoupled from network DB
     for (const company of companies) {
       const rangeInfo = companyRanges[company.id];
       if (!rangeInfo) continue;
