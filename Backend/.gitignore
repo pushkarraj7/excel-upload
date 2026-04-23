@@ -46,3 +46,16 @@ Desktop.ini
 uploads
 
 *.zip
+
+
+# Uploaded Excel files (client data — never push)
+10
+uploads/price-data/
+11
+uploads/initial-company/
+12
+ 
+13
+# Sensitive scripts
+14
+clearDB.js
